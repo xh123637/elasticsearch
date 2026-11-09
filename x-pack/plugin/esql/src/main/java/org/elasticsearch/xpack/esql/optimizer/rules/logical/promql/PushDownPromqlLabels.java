@@ -139,7 +139,12 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
 
         static Classes of(LogicalPlan plan) {
             Classes classes = new Classes();
-            plan.forEachUp(classes::visit);
+            // A join can class a key whose container is computed below it: visit again until no container joins a class.
+            int known;
+            do {
+                known = classes.byId.size();
+                plan.forEachUp(classes::visit);
+            } while (classes.byId.size() != known);
             return classes;
         }
 
@@ -207,13 +212,26 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
             for (Expression expression : node.expressions()) {
                 Expression body = expression instanceof Alias alias ? alias.child() : expression;
                 Integer cls = classOf(body, promql);
+                if (expression instanceof Alias alias && isContainer(alias)) {
+                    cls = merge(cls, byId.get(alias.id()));
+                }
                 if (cls != null) {
-                    if (expression instanceof Alias alias && alias.dataType() == DataType.TSMD_DATA_TYPE) {
-                        assign(alias.id(), cls);
+                    int root = cls;
+                    if (expression instanceof Alias alias && isContainer(alias)) {
+                        assign(alias.id(), root);
                     }
+                    body.forEachDown(Attribute.class, attribute -> {
+                        if (isContainer(attribute)) {
+                            assign(attribute.id(), root);
+                        }
+                    });
                     collect(body, cls);
                 }
             }
+        }
+
+        private static boolean isContainer(NamedExpression named) {
+            return named.resolved() && named.dataType() == DataType.TSMD_DATA_TYPE;
         }
 
         private @Nullable Integer classOf(Expression expression, boolean promql) {
@@ -762,13 +780,20 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
                     names.addAll(shape.labels().keySet());
                     excluded.addAll(shape.excluded());
                 });
+                // The union's residual container leaves a label out only where every branch's does.
+                excluded.addAll(names);
+                excluded.removeIf(
+                    label -> branches.stream()
+                        .anyMatch(branch -> inRest(branch, label) || branch.hasRest() == false && branch.labels().containsKey(label))
+                );
                 Source source = out.source();
                 Attribute restOut = null;
                 // Union outputs are named apart: the container's own name for its residual part, prefixed for its labels.
                 if (rest) {
                     var parts = new ArrayList<Expression>();
                     for (Shape branch : branches) {
-                        parts.add(branch.rest() != null ? branch.rest() : new ToTimeSeriesMetadata(source, absent(source)));
+                        // A branch holding all its labels in columns has them in its residual container as well, as the others do.
+                        parts.add(branch.rest() != null ? branch.rest() : container(branch, source));
                     }
                     restOut = unionOutput(parts, out.name(), DataType.TSMD_DATA_TYPE, evals, projections, output, outputs);
                 }
