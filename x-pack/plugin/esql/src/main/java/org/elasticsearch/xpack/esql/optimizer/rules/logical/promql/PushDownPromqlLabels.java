@@ -380,6 +380,7 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
                 case Project project -> project(project);
                 case HashJoin join -> join(join);
                 case TopNBy topNBy -> topNBy(topNBy);
+                case PackDims pack -> pack(pack);
                 default -> rewritten.transformExpressionsOnlyUp(Expression.class, this::scalar);
             };
         }
@@ -865,6 +866,28 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
                 topNBy.limitPerGroup(),
                 groupings
             );
+        }
+
+        /** A pack of a label container packs its parts: the residual container as text and each label it leaves out. */
+        private LogicalPlan pack(PackDims pack) {
+            var evals = new ArrayList<Alias>();
+            var dims = new ArrayList<Attribute>();
+            for (Attribute dim : pack.dims()) {
+                if (isContainer(dim) == false) {
+                    dims.add(dim);
+                    continue;
+                }
+                Shape shape = shapes.get(dim.id());
+                if (shape.hasRest()) {
+                    dims.add(attribute(restKey(dim.source(), shape), REST_KEY, evals));
+                }
+                shape.labels().forEach((name, label) -> {
+                    if (shape.hasRest() == false || shape.excluded().contains(name)) {
+                        dims.add(attribute(label, name, evals));
+                    }
+                });
+            }
+            return new PackDims(pack.source(), withEvals(pack.child(), evals), dims, pack.packed(), pack.emptyAsAbsent());
         }
 
         private static LogicalPlan withEvals(LogicalPlan child, List<Alias> evals) {
