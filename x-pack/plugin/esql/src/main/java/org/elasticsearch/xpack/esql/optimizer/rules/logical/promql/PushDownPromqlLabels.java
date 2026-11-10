@@ -44,6 +44,7 @@ import org.elasticsearch.xpack.esql.plan.logical.TopNBy;
 import org.elasticsearch.xpack.esql.plan.logical.UnionAll;
 import org.elasticsearch.xpack.esql.plan.logical.UnpackDims;
 import org.elasticsearch.xpack.esql.plan.logical.join.HashJoin;
+import org.elasticsearch.xpack.esql.plan.logical.promql.PromqlCommand;
 import org.elasticsearch.xpack.esql.plan.logical.promql.PromqlLabels;
 import org.elasticsearch.xpack.esql.rule.ParameterizedRule;
 import org.elasticsearch.xpack.esql.session.Configuration;
@@ -85,20 +86,27 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
 
     @Override
     public LogicalPlan apply(LogicalPlan plan, AnalyzerContext context) {
-        return pushDown(plan, context.configuration());
+        return pushDown(plan, context.configuration(), PromqlCommand.usesLabelContainer(context));
     }
 
-    /** {@code plan} with its PromQL label containers split into columns; {@code configuration} renders the ones left whole. */
     static LogicalPlan pushDown(LogicalPlan plan, Configuration configuration) {
+        return pushDown(plan, configuration, true);
+    }
+
+    /**
+     * {@code plan} with its PromQL label containers split into columns; {@code configuration} renders the ones left whole. With
+     * {@code typed} false the plan is lowered to a keyword label container afterwards, which cannot leave labels out of a key.
+     */
+    static LogicalPlan pushDown(LogicalPlan plan, Configuration configuration, boolean typed) {
         Classes classes = Classes.of(plan);
         if (classes.isEmpty()) {
             return plan;
         }
         // A first run finds the views read above each collapse that keeps one row per series; the second one has it carry them.
         Map<NameId, Set<Set<String>>> views = new HashMap<>();
-        new Pushdown(classes, configuration, views, true).rewrite(plan);
+        new Pushdown(classes, configuration, typed, views, true).rewrite(plan);
         int found = views.values().stream().mapToInt(Set::size).sum();
-        LogicalPlan rewritten = new Pushdown(classes, configuration, views, false).rewrite(plan);
+        LogicalPlan rewritten = new Pushdown(classes, configuration, typed, views, false).rewrite(plan);
         if (views.values().stream().mapToInt(Set::size).sum() != found) {
             throw new IllegalStateException("label pushdown found views of a collapse after rewriting it");
         }
@@ -343,10 +351,19 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
 
         /** Whether this run only finds the views read above each collapse. */
         private final boolean finding;
+        /** Whether the plan keeps a typed label container: a keyword one compares a key's labels in its label container too. */
+        private final boolean typed;
 
-        private Pushdown(Classes classes, Configuration configuration, Map<NameId, Set<Set<String>>> views, boolean finding) {
+        private Pushdown(
+            Classes classes,
+            Configuration configuration,
+            boolean typed,
+            Map<NameId, Set<Set<String>>> views,
+            boolean finding
+        ) {
             this.classes = classes;
             this.configuration = configuration;
+            this.typed = typed;
             this.views = views;
             this.finding = finding;
         }
@@ -624,8 +641,21 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
                         rightLabels.add(attribute(get(rightShape, right.source(), name), name, rightEvals));
                     }
                     if (leftShape.hasRest() || rightShape.hasRest()) {
-                        leftFields.add(attribute(restKey(left.source(), leftShape), REST_KEY, leftEvals));
-                        rightFields.add(attribute(restKey(right.source(), rightShape), REST_KEY, rightEvals));
+                        // A label that one side holds in its residual container too and the other in its column alone
+                        // compares packed only: that side's residual container leaves it out.
+                        var leftOut = new TreeSet<String>();
+                        var rightOut = new TreeSet<String>();
+                        for (String name : typed ? names : Set.<String>of()) {
+                            if (inRest(leftShape, name) && inRest(rightShape, name) == false) {
+                                leftOut.add(name);
+                            } else if (inRest(rightShape, name) && inRest(leftShape, name) == false) {
+                                rightOut.add(name);
+                            }
+                        }
+                        Shape leftRest = without(leftShape, left.source(), leftOut);
+                        Shape rightRest = without(rightShape, right.source(), rightOut);
+                        leftFields.add(attribute(restKey(left.source(), leftRest), REST_KEY, leftEvals));
+                        rightFields.add(attribute(restKey(right.source(), rightRest), REST_KEY, rightEvals));
                     }
                 } else {
                     leftFields.add(left);
@@ -677,6 +707,11 @@ public final class PushDownPromqlLabels extends ParameterizedRule<LogicalPlan, L
             Attribute packed = new ReferenceAttribute(child.source(), null, PackDims.PACKED_FIELD_NAME, DataType.KEYWORD);
             keys.add(packed);
             return new PackDims(child.source(), child, labels, packed);
+        }
+
+        /** Whether the residual container of {@code shape} holds {@code label}, whether or not a column holds it as well. */
+        private static boolean inRest(Shape shape, String label) {
+            return shape.hasRest() && shape.excluded().contains(label) == false;
         }
 
         private Expression restKey(Source source, Shape shape) {
