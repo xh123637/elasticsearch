@@ -69,7 +69,7 @@ import java.util.TreeSet;
  * rewriting whole containers is slow, and a node before 9.7 cannot read the typed container at all. This rule splits each container
  * into columns instead: a residual container, which the source reads as a view leaving out the labels the plan removes or writes,
  * and one column per label the plan names. Every operation then works on columns, and the residual view is the keyword
- * {@code _timeseries} once lowered ({@code LowerLabelContainerToKeyword}). Only the command's rendered label container writes
+ * {@code _timeseries} once lowered ({@link LowerLabelContainerToKeyword}). Only the command's rendered label container writes
  * labels back into the residual one.
  * <p>
  * The containers a join or a union compares, and the ones an expression combines, are split alike: they share the set of labels in

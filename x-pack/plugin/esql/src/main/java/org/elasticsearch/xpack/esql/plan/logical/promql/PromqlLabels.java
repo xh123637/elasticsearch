@@ -9,20 +9,46 @@ package org.elasticsearch.xpack.esql.plan.logical.promql;
 
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
+import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.FieldAttribute;
+import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.expression.TimeSeriesMetadataAttribute;
+import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.plan.logical.LogicalPlan;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
- * Shared naming conventions for PromQL labels represented as ES|QL fields.
+ * Label naming and identification shared by PromQL translators.
  */
 public final class PromqlLabels {
     private PromqlLabels() {}
 
     public static final String PROMETHEUS_LABELS_PREFIX = "labels.";
+
+    /**
+     * The labels the tags label of {@code node}'s result leaves out, or null when its result has none. A node states what it
+     * removes or writes ({@link PromqlPlan#excludedLabels}); translation states the same with the label container functions.
+     */
+    public static @Nullable Set<String> excluded(LogicalPlan node) {
+        if (getTagsLabel(node.output()) == null) {
+            return null;
+        }
+        return node instanceof PromqlPlan plan ? plan.excludedLabels() : Set.of();
+    }
+
+    /** The labels {@code input}'s tags label leaves out, together with {@code removed}: what a node over it leaves out. */
+    public static Set<String> excludedWith(LogicalPlan input, Collection<String> removed) {
+        Set<String> inherited = excluded(input);
+        var excluded = new LinkedHashSet<String>(inherited == null ? Set.of() : inherited);
+        excluded.addAll(removed);
+        return excluded;
+    }
 
     /**
      * Whether {@code name} is a valid PromQL label name, used at analysis time to validate the destination (and, for
@@ -37,11 +63,11 @@ public final class PromqlLabels {
     }
 
     /**
-     * The PromQL label name an attribute carries: a {@link FieldAttribute}'s backing field name, otherwise the attribute
-     * name, with the {@code labels.} passthrough prefix stripped so {@code labels.pod} and a bare {@code pod} compare equal.
+     * A mapped field's PromQL label name strips the {@code labels.} passthrough prefix. Derived labels retain their
+     * declared name, so a derived {@code labels.pod} remains distinct from the mapped label {@code pod}.
      */
     public static String labelName(Attribute attribute) {
-        return labelName(attribute instanceof FieldAttribute field ? field.fieldName().string() : attribute.name());
+        return attribute instanceof FieldAttribute field ? labelName(field.fieldName().string()) : attribute.name();
     }
 
     /** Canonical label name for a mapped source field. */
@@ -62,6 +88,20 @@ public final class PromqlLabels {
     /** Whether {@code label} is the tags label: the label container holding every label not declared beside it. */
     public static boolean isTagsLabel(Attribute label) {
         return label instanceof UnresolvedPromqlLabelRef reference && reference.isTagsLabel();
+    }
+
+    /** Label names as the keyword literals the label container functions take. */
+    public static List<Expression> labelLiterals(Source source, Collection<String> names) {
+        return names.stream().<Expression>map(name -> Literal.keyword(source, name)).toList();
+    }
+
+    /** Canonical label names in declaration order, without duplicates. */
+    public static List<String> labelNames(Collection<? extends Attribute> attributes) {
+        var strings = new LinkedHashSet<String>();
+        for (var attribute : attributes) {
+            strings.add(labelName(attribute));
+        }
+        return new ArrayList<>(strings);
     }
 
     /**
@@ -113,4 +153,5 @@ public final class PromqlLabels {
         }
         return null;
     }
+
 }

@@ -162,6 +162,8 @@ import org.elasticsearch.xpack.esql.optimizer.rules.logical.SubstituteSurrogateE
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.TranslateTimeSeriesAggregate;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.TranslateTimeSeriesWithout;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.promql.AddPromqlResultOrder;
+import org.elasticsearch.xpack.esql.optimizer.rules.logical.promql.LowerLabelContainerToKeyword;
+import org.elasticsearch.xpack.esql.optimizer.rules.logical.promql.PushDownPromqlLabels;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.promql.TranslatePromqlToEsqlPlan;
 import org.elasticsearch.xpack.esql.optimizer.rules.logical.promql.TranslateTimeSeriesCollapse;
 import org.elasticsearch.xpack.esql.optimizer.rules.physical.local.LucenePushdownPredicates;
@@ -335,7 +337,11 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
                 // Instant result-ordering functions wrap collapse (or a bare command) with OrderBy before translation.
                 new AddPromqlResultOrder(),
                 // translate PromQL plan to ESQL. It should run before TranslateTimeSeriesAggregate and implicit casting
-                new TranslatePromqlToEsqlPlan()
+                new TranslatePromqlToEsqlPlan(),
+                // Splits the translated plan's label containers into a residual container and a column per label it names.
+                new PushDownPromqlLabels(),
+                // Where a participating node reads only keyword _timeseries, the typed label container of the bound plan goes keyword.
+                new LowerLabelContainerToKeyword()
             ),
             new Batch<>(
                 "Resolution",
@@ -1287,7 +1293,7 @@ public class Analyzer extends ParameterizedRuleExecutor<LogicalPlan, AnalyzerCon
             if (plan instanceof PromqlCommand promql) {
                 return resolvePromql(promql, childrenOutput).transformDown(PromqlCommand.class, p -> {
                     Failures failures = new Failures();
-                    p.verify(failures, context.maxBranchCountPerMerge(), context.maxBranchCountPerMergeLimitSource());
+                    p.verify(failures, context);
                     if (failures.hasFailures()) {
                         throw new VerificationException(failures);
                     }

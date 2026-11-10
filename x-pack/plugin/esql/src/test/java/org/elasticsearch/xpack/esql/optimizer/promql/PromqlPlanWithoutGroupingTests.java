@@ -106,15 +106,7 @@ public class PromqlPlanWithoutGroupingTests extends AbstractPromqlPlanOptimizerT
 
         assertThat(plan.output().stream().map(Attribute::name).toList(), equalTo(List.of("result", "step", MetadataAttribute.TIMESERIES)));
 
-        var timeSeriesMetadata = plan.collect(EsRelation.class)
-            .stream()
-            .flatMap(relation -> relation.output().stream())
-            .filter(TimeSeriesMetadataAttribute.class::isInstance)
-            .map(TimeSeriesMetadataAttribute.class::cast)
-            .findFirst()
-            .orElse(null);
-        assertNotNull(timeSeriesMetadata);
-        assertThat(timeSeriesMetadata.excludedFields(), equalTo(Set.of(LabelMatcher.NAME)));
+        assertEquals(Set.of(LabelMatcher.NAME), viewExclusions(plan));
     }
 
     /**
@@ -161,6 +153,24 @@ public class PromqlPlanWithoutGroupingTests extends AbstractPromqlPlanOptimizerT
             .orElse(null);
         assertNotNull(timeSeriesMetadata);
         assertThat(timeSeriesMetadata.excludedFields(), hasItems("pod", "event"));
+    }
+
+    /**
+     * {@code by(label)} groups by the label's field whether or not it is a dimension, directly over the source or through a
+     * per-series function. Binding only dimensions would drop {@code event} from the keys and sum every series into one group.
+     */
+    public void testByGroupsOnNonDimensionLabel() {
+        for (String expression : List.of("sum by (event) (network.bytes_in)", "sum by (event) (rate(network.total_bytes_in[5m]))")) {
+            var plan = logicalOptimizerWithLatestVersion.optimize(
+                planPromql("PROMQL index=k8s step=1h result=(" + expression + ")", false)
+            );
+            var read = plan.collect(TimeSeriesAggregate.class)
+                .stream()
+                .flatMap(aggregate -> aggregate.references().stream())
+                .filter(attribute -> attribute instanceof FieldAttribute && attribute.name().equals("event"))
+                .toList();
+            assertThat(expression, read, hasSize(1));
+        }
     }
 
     public void testWithoutGroupingSurvivesDataNodePlanSerialization() {
@@ -270,10 +280,7 @@ public class PromqlPlanWithoutGroupingTests extends AbstractPromqlPlanOptimizerT
 
     public void testParentBySynthesizesConsumedBindingFromWithoutCarrier() {
         LogicalPlan analyzed = planPromql("PROMQL index=k8s step=1h result=(sum by (cluster) (sum without (pod) (network.cost)))", false);
-        EsRelation esRelation = analyzed.collect(EsRelation.class).getFirst();
-        var tsmaList = esRelation.expressions().stream().filter(field -> field instanceof TimeSeriesMetadataAttribute).toList();
-        assertThat(tsmaList, hasSize(1));
-        assertEquals(Set.of("pod", LabelMatcher.NAME), ((TimeSeriesMetadataAttribute) tsmaList.getFirst()).excludedFields());
+        assertEquals(Set.of("pod", LabelMatcher.NAME), viewExclusions(analyzed));
         TimeSeriesAggregate innerAggregate = analyzed.collect(TimeSeriesAggregate.class).getFirst();
         assertThat(
             packedDims(innerAggregate.aggregates()).stream()
@@ -414,11 +421,8 @@ public class PromqlPlanWithoutGroupingTests extends AbstractPromqlPlanOptimizerT
                 .toList(),
             hasSize(1)
         );
-        // without () still leaves out the metric name, which an aggregation drops
-        EsRelation esRelation = analyzed.collect(EsRelation.class).getFirst();
-        var tsmaList = esRelation.expressions().stream().filter(field -> field instanceof TimeSeriesMetadataAttribute).toList();
-        assertThat(tsmaList, hasSize(1));
-        assertEquals(Set.of(LabelMatcher.NAME), ((TimeSeriesMetadataAttribute) tsmaList.getFirst()).excludedFields());
+        // WITHOUT () keeps every other label as a grouping key, independently of the parent's named requirements.
+        assertEquals(Set.of(LabelMatcher.NAME), viewExclusions(analyzed));
     }
 
     public void testScalarOverMaxOfWithoutProducesScalarOutput() {
