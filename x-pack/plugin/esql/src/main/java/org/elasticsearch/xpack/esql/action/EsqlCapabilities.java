@@ -2791,6 +2791,12 @@ public class EsqlCapabilities {
         FIX_PROMQL_LABEL_JOIN_EMPTY_REMOVES_LABEL,
 
         /**
+         * PromQL groups by a non-dimension label under {@code by(...)} also when an inner {@code without(...)} carries it, as it
+         * does directly over the source.
+         */
+        FIX_PROMQL_CARRIED_FIELD_LABELS,
+
+        /**
          * PromQL label matchers that accept the empty string (e.g. {@code {label=""}} or {@code {label!="foo"}})
          * also match time series where the label is absent ({@code NULL}), per PromQL spec.
          */
