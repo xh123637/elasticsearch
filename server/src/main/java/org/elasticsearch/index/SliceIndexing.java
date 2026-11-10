@@ -292,25 +292,22 @@ public final class SliceIndexing {
      * {@code /{index}/{_slice}/_search}, {@code /{index}/{_slice}/_count}, {@code /{index}/{_slice}/_delete_by_query},
      * {@code /{index}/{_slice}/_update_by_query}, {@code /{index}/{_slice}/_search/template}, and
      * {@code /{index}/{_slice}/_fleet/_fleet_search}.
+     * <p>
+     * The check is based on whether the router captured a {@code _slice} path parameter, not on the raw path shape:
+     * a plugin route such as {@code /{prefix}/{index}/_search} has the same shape as a slice route but captures no
+     * {@code _slice} parameter. In every slice route the {@code _slice} value is the second path segment.
      */
     static boolean isPathBasedSliceSearch(RestRequest request) {
+        if (request.hasParam(FIELD_NAME) == false) {
+            return false;
+        }
         String rawPath = request.rawPath();
         final int queryStart = rawPath.indexOf('?');
         if (queryStart >= 0) {
             rawPath = rawPath.substring(0, queryStart);
         }
         final String[] parts = Strings.tokenizeToStringArray(rawPath, "/");
-        if (parts.length == 3) {
-            return "_search".equals(parts[2])
-                || "_count".equals(parts[2])
-                || "_delete_by_query".equals(parts[2])
-                || "_update_by_query".equals(parts[2]);
-        }
-        if (parts.length == 4) {
-            return ("_search".equals(parts[2]) && "template".equals(parts[3]))
-                || ("_fleet".equals(parts[2]) && "_fleet_search".equals(parts[3]));
-        }
-        return false;
+        return parts.length >= 3 && parts[1].equals(request.params().get(FIELD_NAME));
     }
 
     /**

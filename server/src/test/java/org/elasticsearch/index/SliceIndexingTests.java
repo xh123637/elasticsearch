@@ -174,22 +174,55 @@ public class SliceIndexingTests extends ESTestCase {
     }
 
     public void testIsPathBasedSliceSearch() {
-        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_search")));
-        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_count")));
-        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_delete_by_query")));
-        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_update_by_query")));
-        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_delete_by_query")));
-        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_update_by_query")));
-        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_search/template")));
-        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_fleet/_fleet_search")));
-        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_search")));
-        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/_search")));
-        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_search/template")));
-        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_fleet/_fleet_search")));
+        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_search", "tenant-a")));
+        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_count", "tenant-a")));
+        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_delete_by_query", "tenant-a")));
+        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_update_by_query", "tenant-a")));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_delete_by_query", null)));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_update_by_query", null)));
+        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_search/template", "tenant-a")));
+        assertTrue(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/tenant-a/_fleet/_fleet_search", "tenant-a")));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_search", null)));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/_search", null)));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_search/template", null)));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/my-index/_fleet/_fleet_search", null)));
     }
 
-    private RestRequest pathSliceRequest(String path) {
-        return new FakeRestRequest.Builder(xContentRegistry()).withPath(path).build();
+    public void testIsPathBasedSliceSearchIgnoresPluginNamespaceRoute() {
+        // A plugin namespaced route /{prefix}/{index}/_search has the same path shape as a slice search
+        // but captures no _slice path parameter, so it must not be treated as a slice search (#165382).
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/_siren/my-index/_search", null)));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/foo/my-index/_search", null)));
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/plugin/my-index/_count", null)));
+        // A _slice value that does not come from the path (e.g. a query parameter) must not count either:
+        // here the second path segment is the index, not the _slice value.
+        assertFalse(SliceIndexing.isPathBasedSliceSearch(pathSliceRequest("/foo/my-index/_search", "tenant-a")));
+    }
+
+    public void testParseSearchRoutingAllowsRoutingOnPluginNamespaceRoute() {
+        // Previously a plugin namespaced route was misclassified as a slice search, so a routing
+        // parameter was rejected with "[routing] is not allowed together with [_slice]" (#165382).
+        RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withPath("/foo/my-index/_search")
+            .withParams(Map.of("index", "my-index", "routing", "r1"))
+            .build();
+        SliceIndexing.ParsedRouting parsed = SliceIndexing.parseSearchRoutingOrSliceWithProvenance(request);
+        assertThat(parsed.routing(), equalTo("r1"));
+        assertThat(parsed.fromSlice(), equalTo(false));
+
+        RestRequest noRouting = new FakeRestRequest.Builder(xContentRegistry()).withPath("/_siren/my-index/_search")
+            .withParams(Map.of("index", "my-index"))
+            .build();
+        SliceIndexing.ParsedRouting parsedNoRouting = SliceIndexing.parseSearchRoutingOrSliceWithProvenance(noRouting);
+        assertNull(parsedNoRouting.routing());
+        assertThat(parsedNoRouting.fromSlice(), equalTo(false));
+    }
+
+    private RestRequest pathSliceRequest(String path, String slice) {
+        var builder = new FakeRestRequest.Builder(xContentRegistry()).withPath(path);
+        if (slice != null) {
+            builder.withParams(Map.of("_slice", slice));
+        }
+        return builder.build();
     }
 
     private static void assertInvalid(String value) {
